@@ -1,0 +1,191 @@
+name: Release and Deploy
+
+# Runs on every merge to main (a merged PR pushes to main). It fully builds the
+# project, publishes the demonstration page to GitHub Pages, attaches the ONNX
+# Runtime Web WASM binaries + the built site to a GitHub Release, and versions
+# that release automatically from Conventional Commit messages.
+#
+# A `[skip ci]` marker is not needed: this workflow never commits back to main,
+# so it cannot retrigger itself. Version state lives in git tags.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write # push tags, create releases
+  pages: write # deploy to GitHub Pages
+  id-token: write # GitHub Pages OIDC
+
+concurrency:
+  group: release-and-deploy
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Test
+        run: npm test
+      - name: Validate example manifests
+        run: node scripts/check-models.mjs public/models/*/manifest.example.json
+      - name: Build site
+        run: npm run build
+      - name: Collect ONNX Runtime Web WASM binaries
+        run: |
+          set -euo pipefail
+          mkdir -p wasm-dist
+          # Canonical binaries shipped inside the package...
+          find node_modules/onnxruntime-web/dist -name '*.wasm' -exec cp -f {} wasm-dist/ \; || true
+          # ...plus anything Vite emitted into the built site (deduped by name).
+          find dist -name '*.wasm' -exec cp -n {} wasm-dist/ \; || true
+          echo "Collected WASM binaries:"
+          ls -la wasm-dist
+          test -n "$(ls -A wasm-dist)" || { echo "No WASM binaries found"; exit 1; }
+      - name: Upload built site
+        uses: actions/upload-artifact@v4
+        with:
+          name: site
+          path: dist
+          retention-days: 7
+      - name: Upload WASM binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm
+          path: wasm-dist
+          retention-days: 7
+
+  release:
+    name: Version and release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Determine next version from Conventional Commits
+        id: version
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+          latest=$(git tag -l 'v*' --sort=-v:refname | head -n1 || true)
+          if [ -z "$latest" ]; then
+            new="0.1.0"
+            echo "No existing tag; starting at v${new}"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "previous=" >> "$GITHUB_OUTPUT"
+            echo "version=${new}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          range="${latest}..HEAD"
+          if [ -z "$(git log --oneline ${range})" ]; then
+            echo "No commits since ${latest}; nothing to release."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          base="${latest#v}"
+          major=$(echo "$base" | cut -d. -f1)
+          minor=$(echo "$base" | cut -d. -f2)
+          patch=$(echo "$base" | cut -d. -f3)
+          log=$(git log ${range} --pretty=format:'%s%n%b')
+          if echo "$log" | grep -qE '^[a-z]+(\([^)]*\))?!:' || echo "$log" | grep -q 'BREAKING CHANGE'; then
+            if [ "$major" -eq 0 ]; then minor=$((minor + 1)); patch=0; else major=$((major + 1)); minor=0; patch=0; fi
+          elif echo "$log" | grep -qE '^feat(\([^)]*\))?:'; then
+            minor=$((minor + 1)); patch=0
+          else
+            patch=$((patch + 1))
+          fi
+          new="${major}.${minor}.${patch}"
+          echo "Next version: v${new} (from ${latest})"
+          echo "release=true" >> "$GITHUB_OUTPUT"
+          echo "previous=${latest}" >> "$GITHUB_OUTPUT"
+          echo "version=${new}" >> "$GITHUB_OUTPUT"
+      - name: Download built site
+        if: steps.version.outputs.release == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: site
+          path: dist
+      - name: Download WASM binaries
+        if: steps.version.outputs.release == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm
+          path: wasm-dist
+      - name: Set package version in built artifacts
+        if: steps.version.outputs.release == 'true'
+        run: npm version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version
+      - name: Package release assets
+        if: steps.version.outputs.release == 'true'
+        run: |
+          set -euo pipefail
+          v="${{ steps.version.outputs.version }}"
+          tar -czf "browser-video-lab-site-${v}.tar.gz" -C dist .
+          (cd wasm-dist && zip -r "../onnxruntime-web-wasm-${v}.zip" .)
+          ls -la ./*.tar.gz ./*.zip
+      - name: Generate release notes
+        if: steps.version.outputs.release == 'true'
+        run: |
+          set -euo pipefail
+          prev="${{ steps.version.outputs.previous }}"
+          if [ -n "$prev" ]; then range="${prev}..HEAD"; else range="HEAD"; fi
+          {
+            echo "## Changes"
+            git log ${range} --no-merges --pretty=format:'- %s (%h)'
+            echo
+            echo
+            echo "### Release assets"
+            echo "- \`onnxruntime-web-wasm-${{ steps.version.outputs.version }}.zip\` — ONNX Runtime Web WASM binaries"
+            echo "- \`browser-video-lab-site-${{ steps.version.outputs.version }}.tar.gz\` — built demonstration site"
+          } > RELEASE_NOTES.md
+          cat RELEASE_NOTES.md
+      - name: Create tag and GitHub Release
+        if: steps.version.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          v="v${{ steps.version.outputs.version }}"
+          git tag "$v"
+          git push origin "$v"
+          gh release create "$v" \
+            "browser-video-lab-site-${{ steps.version.outputs.version }}.tar.gz" \
+            "onnxruntime-web-wasm-${{ steps.version.outputs.version }}.zip" \
+            --title "$v" \
+            --notes-file RELEASE_NOTES.md
+
+  deploy-pages:
+    name: Deploy demonstration page
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Build for GitHub Pages (project sub-path base)
+        run: npm run build -- --base=/${{ github.event.repository.name }}/
+      - name: Add SPA fallback and disable Jekyll
+        run: |
+          cp dist/index.html dist/404.html
+          touch dist/.nojekyll
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+      - id: deploy
+        uses: actions/deploy-pages@v4

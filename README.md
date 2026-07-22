@@ -132,6 +132,30 @@ The initial export is a timestep-conditioned `denoiser.onnx`; it is intentionall
 
 Install [Task](https://taskfile.dev/), then run `task --list`. The Taskfile covers dependency setup, browser development, all checks, distillation smoke/production/export, Wan Smash and benchmarking, packaging, and reproducible-output cleanup.
 
+## Deployment and releases
+
+The build is a static Vite bundle (`dist/`) with the ONNX Runtime Web WASM binaries emitted into `dist/assets`. Two hosting targets are configured.
+
+### Railway
+
+[railway.json](railway.json) builds with Nixpacks (`npm run build`) and serves the bundle with [scripts/serve.mjs](scripts/serve.mjs) — a dependency-free static server that binds `$PORT` and sets the `Cross-Origin-Opener-Policy: same-origin` / `Cross-Origin-Embedder-Policy: require-corp` headers that ONNX Runtime Web's threaded WASM backend requires. Point a Railway service at this repo and deploy; no extra configuration is needed. Locally, `npm run build && npm run serve` reproduces the production server.
+
+### GitHub Pages demonstration page
+
+The [Release and Deploy workflow](.github/workflows/release.yml) publishes the full app (SD-Turbo, LongLive, and MemFlow modes) to GitHub Pages on every merge to `main`, rebuilt with the project sub-path as its base. WebGPU works there, but Pages cannot send COOP/COEP headers, so `SharedArrayBuffer`-backed multithreaded WASM is unavailable and inference falls back to single-threaded — use Railway (or any host that sets those headers) when threading matters.
+
+One-time setup: in the repository **Settings → Pages**, set the source to **GitHub Actions**.
+
+### Automatic versioning and releases
+
+On merge to `main`, the workflow:
+
+1. Fully builds and validates the project (`typecheck`, `test`, manifest check, `build`).
+2. Computes the next version from Conventional Commit messages since the last `vX.Y.Z` tag — `feat:` bumps the minor, `fix:`/others bump the patch, and `!`/`BREAKING CHANGE` bump the major (minor while pre-1.0). Git tags are the source of truth; nothing is committed back to `main`.
+3. Creates the tag and a GitHub Release whose assets are the ONNX Runtime Web WASM binaries (`onnxruntime-web-wasm-<version>.zip`) and the built site (`browser-video-lab-site-<version>.tar.gz`).
+
+Pull requests are gated by the [CI workflow](.github/workflows/ci.yml), which runs the same checks before merge. Tag pushes use the default `GITHUB_TOKEN`; if `main` has tag-protection rules, grant the Actions token permission to create tags.
+
 ## Validate
 
 ```bash
