@@ -1,0 +1,110 @@
+name: Build Models
+
+# Builds the browser student model in CI: distill -> export to ONNX -> validate.
+#
+# GitHub-hosted runners have no GPU, no LongLive teacher checkpoint, and no latent
+# shards, so the full `browser-384m` distillation cannot run here. What CI *can*
+# build reproducibly is the CPU smoke student (tiny synthetic teacher, 2 steps) —
+# which exercises the exact train -> export -> validate path the real build uses.
+#
+# Weight caching happens in three layers so reruns are cheap:
+#   1. pip wheels  — the heavy PyTorch/onnx downloads, keyed on the requirements.
+#   2. model weights — HuggingFace hub + local teacher checkpoints, for real builds.
+#   3. built student — skips distill/export entirely when the pipeline inputs are
+#      byte-for-byte unchanged (keyed on the pipeline source + config).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'python/longlive_distill/**'
+      - 'python/requirements-distill.txt'
+      - 'python/requirements-torch.txt'
+      - '.github/workflows/models.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'python/longlive_distill/**'
+      - 'python/requirements-distill.txt'
+      - 'python/requirements-torch.txt'
+      - '.github/workflows/models.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-models-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Distill, export, and cache the browser student
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: python
+      CONFIG: python/longlive_distill/configs/smoke.yaml
+      OUT: artifacts/distill-smoke
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Layer 1: cache the heavy PyTorch/onnx wheels so we download them once.
+      - name: Cache pip wheels
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-torch-${{ runner.os }}-${{ hashFiles('python/requirements-distill.txt', 'python/requirements-torch.txt') }}
+          restore-keys: pip-torch-${{ runner.os }}-
+
+      # Layer 2: cache downloaded model weights (HF hub + local teacher checkpoints).
+      # Unused by the smoke build, but keyed and in place for real GPU distillation runs.
+      - name: Cache model weights
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/huggingface
+            models
+          key: weights-${{ runner.os }}-${{ hashFiles(env.CONFIG) }}
+          restore-keys: weights-${{ runner.os }}-
+
+      # Layer 3: skip the whole build when the pipeline inputs are unchanged.
+      - name: Restore built student
+        id: student-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.OUT }}
+          key: student-${{ runner.os }}-${{ hashFiles('python/longlive_distill/**/*.py', env.CONFIG) }}
+
+      - name: Install PyTorch (CPU) and distillation deps
+        if: steps.student-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install 'torch>=2.4' --index-url https://download.pytorch.org/whl/cpu
+          pip install -r python/requirements-distill.txt
+
+      - name: Distill student (CPU smoke)
+        if: steps.student-cache.outputs.cache-hit != 'true'
+        run: python -m longlive_distill.train --config "$CONFIG"
+
+      - name: Export to ONNX
+        if: steps.student-cache.outputs.cache-hit != 'true'
+        run: python -m longlive_distill.export --config "$CONFIG" --checkpoint "$OUT/student.pt" --output "$OUT/denoiser.onnx"
+
+      - name: Validate exported model
+        if: steps.student-cache.outputs.cache-hit != 'true'
+        run: python -m longlive_distill.validate --model "$OUT/denoiser.onnx"
+
+      - name: Report reused weights
+        if: steps.student-cache.outputs.cache-hit == 'true'
+        run: echo "Pipeline inputs unchanged — reused cached student weights, skipped distill/export."
+
+      - name: Upload distilled student
+        uses: actions/upload-artifact@v4
+        with:
+          name: distilled-student
+          path: ${{ env.OUT }}
+          retention-days: 14

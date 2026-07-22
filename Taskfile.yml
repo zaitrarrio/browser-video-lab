@@ -4,6 +4,7 @@ vars:
   PYTHON: '{{default ".venv/bin/python" .PYTHON}}'
   NPM_CACHE: '{{default "/tmp/npm-cache" .NPM_CACHE}}'
   DISTILL_CONFIG: '{{default "python/longlive_distill/configs/browser-384m.yaml" .DISTILL_CONFIG}}'
+  DISTILL_SMOKE_CONFIG: '{{default "python/longlive_distill/configs/smoke.yaml" .DISTILL_SMOKE_CONFIG}}'
 
 tasks:
   default:
@@ -62,6 +63,18 @@ tasks:
     requires: {vars: [CHECKPOINT]}
     cmds: ['{{.PYTHON}} -m longlive_distill.export --config {{.DISTILL_CONFIG}} --checkpoint {{.CHECKPOINT}} --output artifacts/longlive-browser/denoiser.onnx']
     env: {PYTHONPATH: python}
+  models:build:
+    desc: Build the browser student end to end (distill -> export -> validate) on CPU
+    deps: [setup:torch]
+    cmds:
+      - '{{.PYTHON}} -m longlive_distill.train --config {{.DISTILL_SMOKE_CONFIG}}'
+      - '{{.PYTHON}} -m longlive_distill.export --config {{.DISTILL_SMOKE_CONFIG}} --checkpoint artifacts/distill-smoke/student.pt --output artifacts/distill-smoke/denoiser.onnx'
+      - '{{.PYTHON}} -m longlive_distill.validate --model artifacts/distill-smoke/denoiser.onnx'
+    env: {PYTHONPATH: python}
+    sources:
+      - python/longlive_distill/**/*.py
+      - '{{.DISTILL_SMOKE_CONFIG}}'
+    generates: [artifacts/distill-smoke/denoiser.onnx]
   smash:wan:
     desc: Compress Wan 2.1 1.3B with Pruna Smash
     deps: [setup:wan]
