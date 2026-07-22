@@ -18,6 +18,9 @@ __pycache__/
 artifacts/
 public/models/**/*.onnx
 public/models/**/manifest.json
+# ...except the SD-Turbo demo manifest, which points at Hugging Face-hosted
+# weights (no local .onnx) and must ship with the GitHub Pages build.
+!public/models/sd/manifest.json
 *.mp4
 
 # Environment / secrets

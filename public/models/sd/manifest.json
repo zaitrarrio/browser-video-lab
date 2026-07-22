@@ -1,0 +1,13 @@
+{
+  "kind": "sd-turbo",
+  "width": 512,
+  "height": 512,
+  "latentScale": 0.18215,
+  "scheduler": { "trainSteps": 1000 },
+  "models": {
+    "tokenizer": "stabilityai/sd-turbo",
+    "text_encoder": "https://huggingface.co/onnxruntime/sd-turbo/resolve/main/text_encoder/model.onnx",
+    "unet": "https://huggingface.co/onnxruntime/sd-turbo/resolve/main/unet/model.onnx",
+    "vae_decoder": "https://huggingface.co/onnxruntime/sd-turbo/resolve/main/vae_decoder/model.onnx"
+  }
+}
