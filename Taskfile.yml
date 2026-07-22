@@ -1,0 +1,80 @@
+version: '3'
+
+vars:
+  PYTHON: '{{default ".venv/bin/python" .PYTHON}}'
+  NPM_CACHE: '{{default "/tmp/npm-cache" .NPM_CACHE}}'
+  DISTILL_CONFIG: '{{default "python/longlive_distill/configs/browser-384m.yaml" .DISTILL_CONFIG}}'
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds: [task --list]
+  setup:
+    desc: Install browser dependencies
+    cmds: ["npm install --cache {{.NPM_CACHE}} --ignore-scripts"]
+    sources: [package.json, package-lock.json]
+    generates: [node_modules/.package-lock.json]
+  setup:python:
+    desc: Create the base Python environment (no torch; installs everywhere)
+    cmds:
+      - python3 -m venv .venv
+      - '{{.PYTHON}} -m pip install --upgrade pip'
+      - '{{.PYTHON}} -m pip install -r python/requirements-distill.txt'
+    generates: [.venv/bin/python]
+  setup:torch:
+    desc: Install PyTorch for distillation (requires a supported GPU platform; see README)
+    deps: [setup:python]
+    cmds: ['{{.PYTHON}} -m pip install -r python/requirements-torch.txt']
+  setup:wan:
+    desc: Install Wan and Pruna dependencies into the Python environment
+    deps: [setup:python]
+    cmds: ['{{.PYTHON}} -m pip install -r python/requirements-wan.txt']
+  dev:
+    desc: Start the WebGPU browser application
+    deps: [setup]
+    cmds: [npm run dev]
+  check:
+    desc: Run every local non-GPU validation
+    deps: [typecheck, test, build, check:models, check:python]
+  typecheck:
+    cmds: [npm run typecheck]
+  test:
+    cmds: [npm test]
+  build:
+    cmds: [npm run build]
+  check:models:
+    cmds: [node scripts/check-models.mjs public/models/*/manifest.example.json]
+  check:python:
+    cmds: [python3 -m compileall -q python]
+  distill:smoke:
+    desc: Exercise the complete distillation loop with tiny synthetic models
+    deps: [setup:torch]
+    cmds: ['{{.PYTHON}} -m longlive_distill.train --config python/longlive_distill/configs/smoke.yaml']
+    env: {PYTHONPATH: python}
+  distill:
+    desc: Distill a configured LongLive teacher into the browser student
+    deps: [setup:torch]
+    cmds: ['{{.PYTHON}} -m longlive_distill.train --config {{.DISTILL_CONFIG}}']
+    env: {PYTHONPATH: python}
+  distill:export:
+    desc: Export a distilled browser student to ONNX
+    deps: [setup:torch]
+    requires: {vars: [CHECKPOINT]}
+    cmds: ['{{.PYTHON}} -m longlive_distill.export --config {{.DISTILL_CONFIG}} --checkpoint {{.CHECKPOINT}} --output artifacts/longlive-browser/denoiser.onnx']
+    env: {PYTHONPATH: python}
+  smash:wan:
+    desc: Compress Wan 2.1 1.3B with Pruna Smash
+    deps: [setup:wan]
+    cmds: ['{{.PYTHON}} python/smash_wan21.py {{.CLI_ARGS}}']
+  benchmark:wan:
+    desc: Benchmark a compressed Wan model; pass its path after --
+    deps: [setup:wan]
+    cmds: ['{{.PYTHON}} python/benchmark_wan21.py {{.CLI_ARGS}}']
+  package:
+    desc: Build the source archive
+    cmds:
+      - tar --exclude='__pycache__' -czf /tmp/browser-video-lab.tar.gz README.md Taskfile.yml package.json package-lock.json tsconfig.json vite.config.ts index.html src public python scripts .gitignore
+      - mv /tmp/browser-video-lab.tar.gz browser-video-lab.tar.gz
+  clean:
+    desc: Remove reproducible build and cache outputs
+    cmds: [rm -rf dist .pytest_cache python/longlive_distill/__pycache__]

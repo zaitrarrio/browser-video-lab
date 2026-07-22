@@ -1,0 +1,10 @@
+# PyTorch for the distillation/export pipeline.
+#
+# torch has NO wheels for macOS x86_64 (dropped after 2.2.2) or Python 3.14,
+# so this file is installed by a separate `task setup:torch` step rather than
+# the base `task setup:python` environment. Use Python <=3.13 on a supported
+# platform (Linux+CUDA, Windows+CUDA/WSL2, or Apple Silicon with MPS).
+#
+# For a specific CUDA build, install from the PyTorch index instead, e.g.:
+#   pip install torch>=2.4 --index-url https://download.pytorch.org/whl/cu124
+torch>=2.4
